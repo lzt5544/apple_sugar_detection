@@ -10,9 +10,9 @@ from PIL import Image
 import random
 
 class AppleSugarDataset(Dataset):
-    def __init__(self, data_dir, csv_file, transform=None, train=True):
-        self.data_dir = data_dir
-        self.csv_file = pd.read_csv(csv_file)
+    def __init__(self, img_dir, excel_file, spec_pp=None, transform=None, train=True):
+        self.img_dir = img_dir
+        self.excel_file = pd.read_csv(excel_file)
         self.transform = transform
         self.train = train
         

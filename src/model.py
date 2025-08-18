@@ -1,7 +1,10 @@
+from typing import Optional, Literal, Dict, Any
+from copy import deepcopy
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision import models
+import timm
 
 class BasicBlock1d(nn.Module):
     """1D卷积基础块"""
@@ -152,6 +155,7 @@ class TransformerEncoder(nn.Module):
                  input_channels=1, 
                  seq_len=256, 
                  embed_dim=64,
+                 output_dim=None,
                  n_heads=4,             
                  n_layers=3, 
                  expansion_ratio=4, 
@@ -173,7 +177,8 @@ class TransformerEncoder(nn.Module):
         else:
             self.pre_net = nn.Linear(input_channels, embed_dim)
         
-        # 光谱位置编码
+        # 位置编码
+        print("序列长：", seq_len)
         self.pos_embed = nn.Parameter(torch.randn(1, seq_len, embed_dim))
         
         # Transformer编码器
@@ -190,31 +195,43 @@ class TransformerEncoder(nn.Module):
         self.pool_type = pool_type
         if pool_type == 'cls':
             self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
+            
+        self.output_dim = output_dim if output_dim is not None else embed_dim
+        if self.output_dim != embed_dim:
+            self.proj = nn.Linear(embed_dim, self.output_dim)
+        else:
+            self.proj = nn.Identity()
 
     def forward(self, x):
+        # 预处理
         if hasattr(self, 'pre_net') and isinstance(self.pre_net[0], nn.Conv1d):
             x = self.pre_net(x)          # [B,C,L] -> [B,D,L//4]
-            x = x.permute(0, 2, 1)      # [B,D,L//4] -> [B,L//4,D]
+            x = x.permute(0, 2, 1)       # [B,D,L//4] -> [B,L//4,D]
         else:
-            x = x.permute(0, 2, 1)      # [B,C,L] -> [B,L,C]
-            x = self.pre_net(x)          # [B,L,C] -> [B,L,D]
+            x = x.permute(0, 2, 1)       # [B,C,L] -> [B,L,C]
+            x = self.pre_net(x)           # [B,L,C] -> [B,L,D]
         
+        # 添加位置编码
         x = x + self.pos_embed
         
+        # 处理CLS Token
         if self.pool_type == 'cls':
             cls_tokens = self.cls_token.expand(x.shape[0], -1, -1)
             x = torch.cat((cls_tokens, x), dim=1)
         
+        # Transformer编码
         x = self.encoder(x)  # [B,L,D]
         
+        # 输出处理
         if self.pool_type == 'cls':
-            return x[:, 0] 
+            x = x[:, 0]                  # [B,D]
         elif self.pool_type == 'mean':
-            return x.mean(dim=1)
+            x = x.mean(dim=1)             # [B,D]
         elif self.pool_type == 'max':
-            return x.max(dim=1).values
-        else:
-            return x
+            x = x.max(dim=1).values       # [B,D]
+        
+        # 投影到目标维度 
+        return self.proj(x)
 
 class ResNetEncoder(nn.Module):
     def __init__(
@@ -252,58 +269,159 @@ class ResNetEncoder(nn.Module):
     def forward(self, x):
         features = self.backbone(x)  # [batch_size, num_features]
         return self.proj(features)
-    
+
 class MultiViewEncoder(nn.Module):
-    def __init__(self, base_encoder, num_views=4, fusion_method='attention'):
+    def __init__(
+        self,
+        base_encoder: nn.Module,
+        num_views: int = 4,
+        fusion_method: str = 'attention',
+        output_dim: Optional[int] = None,
+        dropout: float = 0.1
+    ):
         super().__init__()
-        self.views_encoder = nn.ModuleList([
-            deepcopy(base_encoder) for _ in range(num_views)
-        ])
+
+        assert hasattr(base_encoder, 'output_dim'), "Base encoder must have 'output_dim' attribute"
+        
+        self.views_encoder = nn.ModuleList([deepcopy(base_encoder) for _ in range(num_views)])
+        self.fusion_method = fusion_method
+        self.output_dim = output_dim if output_dim is not None else base_encoder.output_dim
         
         # 多视角融合策略
-        self.fusion_method = fusion_method
         if fusion_method == 'attention':
             self.view_attention = nn.Sequential(
-                nn.Linear(base_encoder.output_dim, 128),
-                nn.ReLU(),
-                nn.Linear(128, 1),
+                nn.Linear(base_encoder.output_dim, base_encoder.output_dim // 2),
+                nn.SiLU(),
+                nn.Dropout(dropout),
+                nn.Linear(base_encoder.output_dim // 2, 1),
                 nn.Softmax(dim=1)
             )
+            # 添加残差连接
+            self.proj = nn.Linear(base_encoder.output_dim, self.output_dim) if output_dim else nn.Identity()
+            
         elif fusion_method == 'lstm':
             self.lstm = nn.LSTM(
                 input_size=base_encoder.output_dim,
-                hidden_size=base_encoder.output_dim,
+                hidden_size=self.output_dim,
                 num_layers=1,
+                batch_first=True,
+                dropout=dropout if dropout > 0 else 0
+            )
+            self.lstm_norm = nn.LayerNorm(self.output_dim)
+            
+        elif fusion_method == 'transformer':
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=base_encoder.output_dim,
+                nhead=4,
+                dim_feedforward=2 * base_encoder.output_dim,
+                dropout=dropout,
                 batch_first=True
             )
-    
-    def forward(self, multi_view_images):
-        """ 输入: [batch_size, num_views, C, H, W] """
-        batch_size = multi_view_images.shape[0]
-        num_views = multi_view_images.shape[1]
+            self.view_transformer = nn.TransformerEncoder(encoder_layer, num_layers=1)
+            self.proj = nn.Linear(base_encoder.output_dim, self.output_dim)
+
+    def forward(self, multi_view_images: torch.Tensor) -> torch.Tensor:
+
+        batch_size, num_views = multi_view_images.shape[:2]
         
         # 各视角独立编码
         view_features = []
         for i in range(num_views):
-            view_img = multi_view_images[:, i]  # [B,C,H,W]
-            feat = self.views_encoder[i](view_img)  # [B,D]
+            feat = self.views_encoder[i](multi_view_images[:, i])  # [B, D]
             view_features.append(feat)
         
         # 多视角融合
+        all_feats = torch.stack(view_features, dim=1)  # [B, N, D]
+        
         if self.fusion_method == 'mean':
-            fused = torch.stack(view_features, dim=1).mean(dim=1)
+            fused = all_feats.mean(dim=1)
         elif self.fusion_method == 'max':
-            fused = torch.stack(view_features, dim=1).max(dim=1).values
+            fused = all_feats.max(dim=1).values
         elif self.fusion_method == 'attention':
-            all_feats = torch.stack(view_features, dim=1)  # [B,N,D]
-            weights = self.view_attention(all_feats)  # [B,N,1]
-            fused = (all_feats * weights).sum(dim=1)  # [B,D]
+            weights = self.view_attention(all_feats)  # [B, N, 1]
+            fused = (all_feats * weights).sum(dim=1)
+            fused = self.proj(fused)
         elif self.fusion_method == 'lstm':
-            all_feats = torch.stack(view_features, dim=1)  # [B,N,D]
             _, (hidden, _) = self.lstm(all_feats)
-            fused = hidden.squeeze(0)  # [B,D]
+            fused = self.lstm_norm(hidden.squeeze(0))
+        elif self.fusion_method == 'transformer':
+            fused = self.view_transformer(all_feats).mean(dim=1)
+            fused = self.proj(fused)
             
         return fused
+    
+class CrossModalFusion(nn.Module):
+    def __init__(
+        self,
+        in_dim_spectral: int,
+        in_dim_image: int,
+        method: str = 'concat',
+        hidden_dim: int = 512,
+        num_heads: int = 8,
+        dropout: float = 0.1
+    ):
+        super().__init__()
+        self.method = method
+        self.hidden_dim = hidden_dim
+        
+        if method == 'concat':
+            # 拼接后投影
+            self.proj = nn.Sequential(
+                nn.Linear(in_dim_spectral + in_dim_image, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout)
+            )
+            
+        elif method == 'bilinear':
+            # 双线性交互
+            self.bilinear = nn.Bilinear(in_dim_spectral, in_dim_image, hidden_dim)
+            self.norm = nn.LayerNorm(hidden_dim)
+            self.dropout = nn.Dropout(dropout)
+            
+        elif method == 'cross_attention':
+            # 跨模态注意力
+            assert in_dim_spectral == in_dim_image, "Cross-attention需要相同输入维度"
+            self.query = nn.Linear(in_dim_spectral, hidden_dim)
+            self.key = nn.Linear(in_dim_image, hidden_dim)
+            self.value = nn.Linear(in_dim_image, hidden_dim)
+            self.multihead_attn = nn.MultiheadAttention(
+                embed_dim=hidden_dim,
+                num_heads=num_heads,
+                dropout=dropout,
+                batch_first=True
+            )
+            self.norm = nn.LayerNorm(hidden_dim)
+            self.dropout = nn.Dropout(dropout)
+            
+        else:
+            raise ValueError(f"未知融合方法: {method}")
+
+    def forward(self, spectral_feat: torch.Tensor, image_feat: torch.Tensor) -> torch.Tensor:
+
+        if self.method == 'concat':
+            fused = torch.cat([spectral_feat, image_feat], dim=-1)
+            return self.proj(fused)
+            
+        elif self.method == 'bilinear':
+            fused = self.bilinear(spectral_feat, image_feat)
+            return self.dropout(self.norm(F.relu(fused)))
+            
+        elif self.method == 'cross_attention':
+            # 使用光谱特征作为query，图像特征作为key/value
+            query = self.query(spectral_feat).unsqueeze(1)  # [B, 1, D]
+            key = self.key(image_feat).unsqueeze(1)
+            value = self.value(image_feat).unsqueeze(1)
+            
+            attn_output, _ = self.multihead_attn(
+                query=query,
+                key=key,
+                value=value,
+                need_weights=False
+            )
+            fused = self.dropout(self.norm(attn_output.squeeze(1)))
+            return fused
+
     
 class AppleSugarModel(nn.Module):
     def __init__(
@@ -354,8 +472,11 @@ class AppleSugarModel(nn.Module):
         assert spectral is not None or images is not None, "需要至少一个输入"
         
         if not self.is_multimodal:
-            features = self.spectral_encoder(spectral) if spectral is not None \
-                      else self.image_encoder(images)
+            if self.spectral_encoder is not None:
+                features = self.spectral_encoder(spectral)
+            else:
+                features = self.image_encoder(images)
+
             output = self.proj(features)
         
         else:
@@ -375,8 +496,6 @@ class AppleSugarModel(nn.Module):
             None: None
         }.get(name)
 
-from typing import Optional, Literal, Dict, Any
-import torch.nn as nn
 
 def get_model(
     # 编码器选择
@@ -431,11 +550,9 @@ def get_model(
         )
     elif spectral_encoder_type == 'transformer':
         spectral_encoder = TransformerEncoder(
-            input_channels=1,
-            seq_len=101,
             output_dim=hidden_dim if fusion_method != 'concat' else None,
             **{k:v for k,v in spectral_params.items() 
-               if k in ['embed_dim', 'n_heads', 'n_layers', 'pool_type', 'use_cnn_preproc']}
+               if k in ['seq_len', 'embed_dim', 'n_heads', 'n_layers', 'pool_type', 'use_cnn_preproc']}
         )
 
     # 构建图像编码器

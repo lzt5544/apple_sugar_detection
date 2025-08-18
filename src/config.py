@@ -16,7 +16,6 @@ RESULTS_DIR = os.path.join(PROJECT_ROOT, 'results')
 LOGS_DIR = os.path.join(RESULTS_DIR, 'logs')
 
 # 模型参数
-MODEL_NAME = 'resnet50'  # 可选: 'resnet50', 'custom'
 PRETRAINED = True
 FREEZE_LAYERS = True
 IMG_SIZE = 224

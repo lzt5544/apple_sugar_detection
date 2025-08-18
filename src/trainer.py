@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from src.data_loader import get_data_loaders
+from dataset import get_data_loaders
 from src.model import get_model, load_model_weights
 
 # 设置日志

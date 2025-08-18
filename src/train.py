@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 from src.config import *
-from src.data_loader import get_data_loaders
+from dataset import get_data_loaders
 from src.model import get_model
 from src.trainer import Trainer, TrainingConfig, ModelCheckpointCallback, EarlyStoppingCallback, TensorBoardCallback
 
