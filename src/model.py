@@ -71,7 +71,7 @@ class ResNet1dEncoder(nn.Module):
         elif pool_type == "max":
             self.pool = nn.AdaptiveMaxPool1d(1)
         else:  # None
-            self.pool = nn.Identity()
+            self.pool = nn.AdaptiveAvgPool1d(1)
         
         # 投影层
         default_output_dim = channels[-1] * block.expansion
@@ -117,7 +117,7 @@ class ResNet1dEncoder(nn.Module):
             x = layer(x)
 
         if isinstance(self.pool, nn.Identity):
-            features = x.transpose(1, 2)  # [B, C, L] -> [B, L, C]
+            features = x.view(x.size(0), -1)  # [B, C, L] -> [B, L, C]
         else:
             x = self.pool(x)  # [B, C, 1]
             features = x.view(x.size(0), -1)  # [B, C]

@@ -1,4 +1,6 @@
 import os
+import re
+
 import numpy as np
 import pandas as pd
 import torch
@@ -10,97 +12,9 @@ from scipy.linalg import lstsq
 from scipy.signal import savgol_filter
 import random
 
-# 光谱预处理类 (已提供)
-class SpectralPreprocessor:
-    @staticmethod
-    def snv(x: np.ndarray) -> np.ndarray:
-        mu = np.mean(x, axis=-1, keepdims=True)
-        sd = np.std(x, axis=-1, ddof=1, keepdims=True) + 1e-8
-        return ((x - mu) / sd).astype(np.float32)
+from src.utils import SpectralPreprocessor
 
-    @staticmethod
-    def msc(x: np.ndarray, reference: Optional[np.ndarray] = None) -> np.ndarray:
-        if reference is None:
-            reference = np.mean(x, axis=0)
-        coeffs = lstsq(reference[:, None], x.T, lapack_driver='gelsy')[0].T
-        return (x - coeffs[:, 0:1]) / coeffs[:, 1:2]
 
-    @staticmethod
-    def detrend(x: np.ndarray, type: str = "linear") -> np.ndarray:
-        from scipy.signal import detrend as sp_detrend
-        if x.ndim == 1:
-            return sp_detrend(x, type=type).astype(np.float32)
-        return np.apply_along_axis(sp_detrend, -1, x, type=type).astype(np.float32)
-
-    @staticmethod
-    def mean_centering(x: np.ndarray) -> np.ndarray:
-        mean = np.mean(x, axis=-1, keepdims=True)
-        return (x - mean).astype(np.float32)
-
-    @staticmethod
-    def standardization(x: np.ndarray) -> np.ndarray:
-        mean = np.mean(x, axis=-1, keepdims=True)
-        std = np.std(x, axis=-1, ddof=1, keepdims=True) + 1e-8
-        return ((x - mean) / std).astype(np.float32)
-
-    @staticmethod
-    def savitzky_golay(x: np.ndarray, window_length: int = 11, polyorder: int = 2, deriv: int = 0) -> np.ndarray:
-        if x.ndim == 1:
-            return savgol_filter(x, window_length, polyorder, deriv=deriv).astype(np.float32)
-        return np.apply_along_axis(lambda y: savgol_filter(y, window_length, polyorder, deriv=deriv), -1, x).astype(np.float32)
-
-    @staticmethod
-    def derivative(x: np.ndarray, order: int = 1, delta: float = 1.0) -> np.ndarray:
-        if order == 1:
-            deriv = np.diff(x, n=1, axis=-1)
-            return np.concatenate([deriv, np.zeros_like(deriv[..., :1])], axis=-1).astype(np.float32) / delta
-        elif order == 2:
-            deriv = np.diff(x, n=2, axis=-1)
-            return np.concatenate([np.zeros_like(deriv[..., :1]), deriv, np.zeros_like(deriv[..., :1])], axis=-1).astype(np.float32) / (delta ** 2)
-        else:
-            raise ValueError("仅支持一阶和二阶导数")
-
-    @staticmethod
-    def minmax_range(x: np.ndarray, range: tuple = (0, 1)) -> np.ndarray:
-        min_val = np.min(x, axis=-1, keepdims=True)
-        max_val = np.max(x, axis=-1, keepdims=True)
-        return (x - min_val) / (max_val - min_val + 1e-8) * (range[1] - range[0]) + range[0]
-
-    @staticmethod
-    def log_transform(x: np.ndarray, offset: float = 1.0) -> np.ndarray:
-        return np.log10(x + offset).astype(np.float32)
-
-    @staticmethod
-    def pipeline(x: Union[np.ndarray, list], steps: list = ["snv"]) -> np.ndarray:
-        x = np.asarray(x, dtype=np.float32)
-        if x.ndim == 1:
-            x = x[np.newaxis, :]
-        
-        for step in steps:
-            if step == "snv":
-                x = SpectralPreprocessor.snv(x)
-            elif step == "msc":
-                x = SpectralPreprocessor.msc(x)
-            elif step == "detrend":
-                x = SpectralPreprocessor.detrend(x)
-            elif step == "normalize":
-                x = SpectralPreprocessor.minmax_range(x)
-            elif step == "log":
-                x = SpectralPreprocessor.log_transform(x)
-            elif step == "mean_center":
-                x = SpectralPreprocessor.mean_centering(x)
-            elif step == "standardize":
-                x = SpectralPreprocessor.standardization(x)
-            elif step == "savgol":
-                x = SpectralPreprocessor.savitzky_golay(x)
-            elif step == "derivative1":
-                x = SpectralPreprocessor.derivative(x, order=1)
-            elif step == "derivative2":
-                x = SpectralPreprocessor.derivative(x, order=2)
-            elif step != "raw":
-                raise ValueError(f"非支持的预处理步骤: {step}")
-        
-        return x.squeeze()
 
 def load_spectrum_table(xls_path: str):
     df = pd.read_excel(xls_path)
@@ -192,7 +106,7 @@ class AppleSugarDataset(Dataset):
                         pass
 
         sample = {
-            "spectrum": spectrum,
+            "spectrum": spectrum.unsqueeze(0),
             "sugar": sugar,
             "sid": torch.LongTensor([int(sid)]),
             "cid": torch.LongTensor([int(cid)]),
