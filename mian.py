@@ -87,7 +87,7 @@ spec_preprocess = ['snv']
 
 
 spectral_encoder = ResNet1dEncoder(BasicBlock1d, (2, 2), output_dim=512)
-image_encoder = MultiViewEncoder(VitEncoder(), 2, output_dim=512)
+image_encoder = MultiViewEncoder(VitEncoder(), num_views=2, output_dim=512)
 
 model = AppleSugarModel(
     spectral_encoder = None,

@@ -1,10 +1,7 @@
 import os
 import sys
-import time
 import logging
-import argparse
 from typing import Dict, List, Optional, Union, Callable, Literal
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -368,7 +365,7 @@ class Trainer:
                 metric_value = METRICS[metric_name](preds_tensor, targets_tensor).item()
                 metrics[metric_name] = metric_value
             else:
-                logger.warning(f'指标 {metric_name} 未在METRICS字典中定义，跳过计算。')
+                logger.warning(f'metric {metric_name} is not defined in the METRICS dictionary, skip calculation。')
 
         return metrics
 
