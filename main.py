@@ -35,29 +35,31 @@ model_config = {
     #     'layers' : (2, 2),
     #     'output_dim' : hidden_dim,
     #     },
-    'image_encoder' : {
-        'type' : 'multiview',
-        'base_encoder' : {
-            'type' : 'vit',
-            'output_dim' : hidden_dim,
-        },
-        'num_views' : views,
-        'output_dim' : hidden_dim,
-        'fusion_method' : 'attention',
-        'dropout' : 1.0
-    },
     # 'image_encoder' : {
-    #     'type' : 'vit',
+    #     'type' : 'multiview',
+    #     'base_encoder' : {
+    #         'type' : 'vit',
+    #         'output_dim' : hidden_dim,
+    #         'pretrained' : False
+    #     },
+    #     'num_views' : views,
     #     'output_dim' : hidden_dim,
-    # }
+    #     'fusion_method' : 'attention',
+    #     'dropout' : 1.0
+    # },
+    'image_encoder' : {
+        'type' : 'resnet',
+        'output_dim' : hidden_dim,
+        # 'pretrained' : True
+    }
 }
 
 # 数据集相关
-img_dir = r'data/fig'
+img_dir = r'data/fig2'
 excel_path = r'data/specv2.xlsx'
-batch_size = 128
+batch_size = 32
 img_size = 224
-seed = 42
+seed = 0
 spec_preprocess = ['snv']
 
 model = get_model(
@@ -78,16 +80,17 @@ train_loader, val_loader, test_loader = get_data_loaders(
 )
 
 # 优化器和损失函数
-lr = 3e-3
-weight_decay = 1e-4
+lr = 5e-3
+weight_decay = 1e-5
 
-optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+# optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9)
 
 criterion = nn.SmoothL1Loss(beta=0.1)
 # criterion = nn.MSELoss()
 
 # 学习率调度器
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=2)
 
 # 创建训练配置
 config = TrainingConfig(

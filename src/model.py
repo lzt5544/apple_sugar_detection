@@ -444,7 +444,9 @@ class AppleSugarModel(nn.Module):
         # 单模态输出
         if not self.is_multimodal:
             encoder = spectral_encoder if spectral_encoder else image_encoder
-            self.proj = nn.Linear(encoder.output_dim, output_dim)
+            self.proj = nn.Sequential(
+                nn.Linear(encoder.output_dim, output_dim),
+            )
         
         # 多模态融合
         else:
@@ -474,6 +476,7 @@ class AppleSugarModel(nn.Module):
             if self.spectral_encoder is not None:
                 features = self.spectral_encoder(spectral)
             else:
+                images = images[:, 0, :, :, :]  # 单视角
                 features = self.image_encoder(images)
 
             output = self.proj(features)

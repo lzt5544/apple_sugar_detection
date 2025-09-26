@@ -108,6 +108,7 @@ class AppleSugarDataset(Dataset):
                     
                     try:
                         if not matching_files:
+                            print(f"Warning: No image found for {sid}_{cid}_{view} in {self.img_dir}")
                             pass
                         else:
                             img_path = matching_files[0]
