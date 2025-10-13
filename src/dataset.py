@@ -135,17 +135,18 @@ class AppleSugarDataset(Dataset):
 
 def split_data(df, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, random_seed=42):
     assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, "比例总和必须为1"
-    
-    # 确保可重复性
-    df = df.sample(frac=1, random_state=random_seed).reset_index(drop=True)
-    
+
     n = len(df)
+    indexs = np.arange(0, n)
+    np.random.seed(random_seed)
+    np.random.shuffle(indexs)
+    
     train_end = int(n * train_ratio)
     val_end = train_end + int(n * val_ratio)
     
-    train_df = df.iloc[:train_end]
-    val_df = df.iloc[train_end:val_end]
-    test_df = df.iloc[val_end:]
+    train_df = df.iloc[indexs[:train_end], :]
+    val_df = df.iloc[indexs[train_end:val_end], :]
+    test_df = df.iloc[indexs[val_end:], :]
     
     return train_df, val_df, test_df
 

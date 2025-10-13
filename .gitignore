@@ -1,6 +1,8 @@
 data/fig*
 logs/
 models/
+token
+uv.lock
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

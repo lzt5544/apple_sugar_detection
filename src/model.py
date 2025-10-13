@@ -372,6 +372,16 @@ class CrossModalFusion(nn.Module):
                 nn.Dropout(dropout)
             )
             
+        elif method == 'add' or method == 'mul':
+            # 直接相加
+            assert in_dim_spectral == in_dim_image, "Add方法和Mul需要相同输入维度"
+            self.proj = nn.Squential(
+                nn.Linear(in_dim_spectral, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout)
+            )
+            
         elif method == 'bilinear':
             # 双线性交互
             self.bilinear = nn.Bilinear(in_dim_spectral, in_dim_image, hidden_dim)
@@ -400,6 +410,14 @@ class CrossModalFusion(nn.Module):
 
         if self.method == 'concat':
             fused = torch.cat([spectral_feat, image_feat], dim=-1)
+            return self.proj(fused)
+        
+        elif self.method == 'add':
+            fused = spectral_feat + image_feat
+            return self.proj(fused)
+        
+        elif self.method == 'mult':
+            fused = spectral_feat * image_feat
             return self.proj(fused)
             
         elif self.method == 'bilinear':
@@ -504,7 +522,7 @@ def get_spectral_encoder(config: Dict[str, Any]) -> nn.Module:
             block=BasicBlock1d,
             in_channels=config.get('in_channels', 1),
             output_dim=config.get('output_dim', None),
-            layers=config.get('layers', [2,2]),
+            layers=config.get('layers', (2,2)),
             pool_type=config.get('pool_type', 'avg'),
             zero_init_residual=config.get('zero_init_residual', False)
         )

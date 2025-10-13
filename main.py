@@ -15,7 +15,6 @@ def clear_folder(folder_path):
     
     for filename in os.listdir(folder_path):
         file_path = os.path.join(folder_path, filename)
-        
         try:
             if os.path.isfile(file_path) or os.path.islink(file_path):
                 os.unlink(file_path)  # 删除文件或符号链接
@@ -30,11 +29,12 @@ clear_folder("models")
 hidden_dim = 512
 views = 2
 model_config = {
-    # 'spectral_encoder' : {
-    #     'type' : 'resnet1d',
-    #     'layers' : (2, 2),
-    #     'output_dim' : hidden_dim,
-    #     },
+    'spectral_encoder' : {
+        'type' : 'resnet1d',
+        'layers' : (2, 2),
+        'output_dim' : hidden_dim,
+        'pool_type' : 'avg'
+        },
     # 'image_encoder' : {
     #     'type' : 'multiview',
     #     'base_encoder' : {
@@ -51,7 +51,7 @@ model_config = {
         'type' : 'resnet',
         'output_dim' : hidden_dim,
         # 'pretrained' : True
-    }
+    },
 }
 
 # 数据集相关
@@ -80,8 +80,8 @@ train_loader, val_loader, test_loader = get_data_loaders(
 )
 
 # 优化器和损失函数
-lr = 5e-3
-weight_decay = 1e-5
+lr = 3e-4
+weight_decay = 0
 
 optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 # optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9)
