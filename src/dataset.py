@@ -1,5 +1,6 @@
 import os
 import re
+import glob
 
 import numpy as np
 import pandas as pd
@@ -82,28 +83,43 @@ class AppleSugarDataset(Dataset):
         image_tensor = None
         if self.img_dir is not None:
             if self.views == 1:
-                img_path = os.path.join(self.img_dir, f"{sid}_{cid}_1.jpg")
+                pattern = os.path.join(self.img_dir, f"{sid}_{cid}_1.*")
+                matching_files = glob.glob(pattern)
                 try:
-                    image = Image.open(img_path).convert("RGB")
-                    if self.transform:
-                        image_tensor = self.transform(image)
+                    if not matching_files:
+                        image_tensor = torch.zeros(3, *self.default_img_size, dtype=torch.float32)
+                        print(f"Warning: No image found for {sid}_{cid}_1 in {self.img_dir}")
                     else:
-                        image_tensor = torch.FloatTensor(np.array(image) / 255.0).permute(2, 0, 1)
-                except FileNotFoundError:
+                        img_path = matching_files[0]
+                        image = Image.open(img_path).convert("RGB")
+                        if self.transform:
+                            image_tensor = self.transform(image)
+                        else:
+                            image_tensor = torch.FloatTensor(np.array(image) / 255.0).permute(2, 0, 1)
+                except Exception as e:
+                    print(f"Error loading image {img_path}: {e}")
                     image_tensor = torch.zeros(3, *self.default_img_size, dtype=torch.float32)
+                    
             else:
                 image_tensor = torch.zeros((self.views, 3, *self.default_img_size), dtype=torch.float32)
                 for view in range(1, self.views + 1):
-                    img_path = os.path.join(self.img_dir, f"{sid}_{cid}_{view}.jpg")
+                    pattern = os.path.join(self.img_dir, f"{sid}_{cid}_{view}.*")
+                    matching_files = glob.glob(pattern)
+                    
                     try:
-                        image = Image.open(img_path).convert("RGB")
-                        if self.transform:
-                            img_tensor = self.transform(image)
+                        if not matching_files:
+                            print(f"Warning: No image found for {sid}_{cid}_{view} in {self.img_dir}")
+                            pass
                         else:
-                            img_tensor = torch.FloatTensor(np.array(image) / 255.0).permute(2, 0, 1)
-                        image_tensor[view - 1] = img_tensor
-                    except FileNotFoundError:
-                        pass
+                            img_path = matching_files[0]
+                            image = Image.open(img_path).convert("RGB")
+                            if self.transform:
+                                img_tensor = self.transform(image)
+                            else:
+                                img_tensor = torch.FloatTensor(np.array(image) / 255.0).permute(2, 0, 1)
+                            image_tensor[view - 1] = img_tensor
+                    except Exception as e:
+                        print(f"Error loading image {img_path}: {e}")
 
         sample = {
             "spectrum": spectrum.unsqueeze(0),
@@ -119,17 +135,18 @@ class AppleSugarDataset(Dataset):
 
 def split_data(df, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, random_seed=42):
     assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, "比例总和必须为1"
-    
-    # 确保可重复性
-    df = df.sample(frac=1, random_state=random_seed).reset_index(drop=True)
-    
+
     n = len(df)
+    indexs = np.arange(0, n)
+    np.random.seed(random_seed)
+    np.random.shuffle(indexs)
+    
     train_end = int(n * train_ratio)
     val_end = train_end + int(n * val_ratio)
     
-    train_df = df.iloc[:train_end]
-    val_df = df.iloc[train_end:val_end]
-    test_df = df.iloc[val_end:]
+    train_df = df.iloc[indexs[:train_end], :]
+    val_df = df.iloc[indexs[train_end:val_end], :]
+    test_df = df.iloc[indexs[val_end:], :]
     
     return train_df, val_df, test_df
 
@@ -138,7 +155,7 @@ def get_data_loaders(
     excel_path,
     batch_size=32,
     img_size=224,
-    num_workers=4,
+    num_workers=8,
     random_seed=42,
     train_ratio=0.7,
     val_ratio=0.15,
@@ -218,6 +235,7 @@ def get_data_loaders(
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
+        persistent_workers=True,
         pin_memory=True)
     
     val_loader = DataLoader(
@@ -225,6 +243,7 @@ def get_data_loaders(
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
+        persistent_workers=True,
         pin_memory=True)
     
     test_loader = DataLoader(
@@ -232,6 +251,7 @@ def get_data_loaders(
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
+        persistent_workers=True,
         pin_memory=True)
     
     return train_loader, val_loader, test_loader

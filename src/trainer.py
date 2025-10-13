@@ -1,19 +1,14 @@
 import os
 import sys
-import time
 import logging
-import argparse
-from typing import Dict, List, Optional, Union, Callable, Literal
-import numpy as np
+import datetime
+from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-
-from src.dataset import get_data_loaders
-from src.model import get_model
 
 # 设置日志
 logging.basicConfig(
@@ -107,17 +102,20 @@ class ModelCheckpointCallback(Callback):
         metrics = trainer.metrics
 
         # 保存最佳模型
-        # if self.save_best_only and self.monitor in metrics:
-        #     current_score = metrics[self.monitor]
-        #     if not hasattr(trainer, 'best_score') or (
-        #         (self.mode == 'min' and current_score < trainer.best_score) or
-        #         (self.mode == 'max' and current_score > trainer.best_score)
-        #     ):
-        #         trainer.best_score = current_score
-        #         checkpoint_path = os.path.join(self.save_dir, 'best_model.pth')
-        #         trainer.save_checkpoint(checkpoint_path, epoch, is_best=True)
-        #         metric_name = self.monitor.replace('val_', '').upper()
-        #         logger.info(f'Saved best model to {checkpoint_path} with {metric_name}: {current_score:.4f}')
+        if self.save_best_only and self.monitor in metrics:
+            current_score = metrics[self.monitor]
+            if trainer.best_score is None:
+                trainer.best_score = current_score
+                
+            if not hasattr(trainer, 'best_score') or (
+                (self.mode == 'min' and current_score < trainer.best_score) or
+                (self.mode == 'max' and current_score > trainer.best_score)
+            ):
+                trainer.best_score = current_score
+                checkpoint_path = os.path.join(self.save_dir, 'best_model.pth')
+                trainer.save_checkpoint(checkpoint_path, epoch, is_best=True)
+                metric_name = self.monitor.replace('val_', '').upper()
+                logger.info(f'Saved best model to {checkpoint_path} with {metric_name}: {current_score:.4f}')
 
         # 按间隔保存模型
         if not self.save_best_only and (epoch + 1) % self.save_interval == 0:
@@ -163,9 +161,12 @@ class EarlyStoppingCallback(Callback):
 # TensorBoard回调
 class TensorBoardCallback(Callback):
     def __init__(self, log_dir: str) -> None:
-        self.log_dir = log_dir
-        self.writer = SummaryWriter(log_dir=log_dir)
+        self.log_dir = log_dir + '/run_' + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.writer = SummaryWriter(log_dir=self.log_dir)
 
+    def on_train_start(self, trainer):
+        self.writer.add_text('comment', trainer.comment)
+    
     def on_epoch_end(self, trainer: 'Trainer') -> None:
         epoch = trainer.current_epoch
         metrics = trainer.metrics
@@ -178,7 +179,28 @@ class TensorBoardCallback(Callback):
         self.writer.add_scalar('train/batch_loss', trainer.current_loss, global_step)
 
     def on_train_end(self, trainer: 'Trainer') -> None:
+        train_id, train_pred, train_true = trainer.collect_predictions(trainer.train_loader)
+        val_id, val_pred, val_true = trainer.collect_predictions(trainer.val_loader)
+        test_id, test_pred, test_true = trainer.collect_predictions(trainer.test_loader)
+        
+        table = f"| Dataset | ID | True Value | Predicted Value | Residual |<br>"
+        table += "|---------|----|------------|-----------------|----------|<br>"
+        
+        for i, (id_val, t, p) in enumerate(zip(train_id, train_true.numpy(), train_pred.numpy())):
+            residual = p - t
+            table += f"| Train   | {id_val} | {t:.4f}     | {p:.4f}          | {residual:+.4f}  |<br>"
+        
+        for i, (id_val, t, p) in enumerate(zip(val_id, val_true.numpy(), val_pred.numpy())):
+            residual = p - t
+            table += f"| Val     | {id_val} | {t:.4f}     | {p:.4f}          | {residual:+.4f}  |<br>"
+        
+        for i, (id_val, t, p) in enumerate(zip(test_id, test_true.numpy(), test_pred.numpy())):
+            residual = p - t
+            table += f"| Test    | {id_val} | {t:.4f}     | {p:.4f}          | {residual:+.4f}  |<br>"
+        
+        self.writer.add_text('residual', table)
         self.writer.close()
+
         
 # 训练器类
 class Trainer:
@@ -193,6 +215,7 @@ class Trainer:
         optimizer: Optional[optim.Optimizer] = None,
         scheduler: Optional[optim.lr_scheduler._LRScheduler] = None,
         callbacks: Optional[List[Callback]] = None,
+        comment: str = ''
     ) -> None:
         self.config = config
         self.model = model
@@ -202,9 +225,10 @@ class Trainer:
         self.criterion = criterion or nn.MSELoss()
         self.optimizer = optimizer or optim.Adam(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
         self.scheduler = scheduler or optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.1, patience=5, verbose=True
+            optimizer=self.optimizer, mode='min', factor=0.1, patience=5, verbose=True
         )
         self.callbacks = callbacks or []
+        self.comment = comment
 
         # 初始化设备
         self.device = torch.device(config.device)
@@ -286,10 +310,12 @@ class Trainer:
             # 反向传播和优化
             if self.scaler is not None:
                 self.scaler.scale(loss).backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
 
             # 统计损失
@@ -328,18 +354,19 @@ class Trainer:
         from src.metrics import METRICS
         self.model.eval()
         val_loss = 0.0
+        
+        # 在GPU上累积预测和目标值
         all_preds = []
         all_targets = []
+        
         metrics = {}
 
         with torch.no_grad():
             for batch in loader:
-                # 假设最后一个元素是目标值
                 spec, imgs, targets = batch['spectrum'], batch['image'], batch['sugar']
-                # 将所有输入移到设备上
-                spec = spec.to(self.device)
-                imgs = imgs.to(self.device)
-                targets = targets.to(self.device).squeeze()
+                spec = spec.to(self.device, non_blocking=True)
+                imgs = imgs.to(self.device, non_blocking=True)
+                targets = targets.to(self.device, non_blocking=True).squeeze()
 
                 if self.scaler is not None:
                     with torch.cuda.amp.autocast():
@@ -350,13 +377,12 @@ class Trainer:
                     loss = self.criterion(outputs, targets)
 
                 val_loss += loss.item()
-
-                # 收集预测和目标值
-                all_preds.extend(outputs.cpu().numpy())
-                all_targets.extend(targets.cpu().numpy())
-
-        preds_tensor = torch.tensor(all_preds)
-        targets_tensor = torch.tensor(all_targets)
+                
+                all_preds.append(outputs)
+                all_targets.append(targets)
+        
+        all_preds_tensor = torch.cat(all_preds).cpu()
+        all_targets_tensor = torch.cat(all_targets).cpu()
 
         # 计算指标
         epoch_loss = val_loss / len(loader)
@@ -365,12 +391,43 @@ class Trainer:
         # 计算指定的指标
         for metric_name in metrics_to_compute:
             if metric_name in METRICS:
-                metric_value = METRICS[metric_name](preds_tensor, targets_tensor).item()
+                metric_value = METRICS[metric_name](all_preds_tensor, all_targets_tensor).item()
                 metrics[metric_name] = metric_value
             else:
-                logger.warning(f'指标 {metric_name} 未在METRICS字典中定义，跳过计算。')
+                logger.warning(f'metric {metric_name} is not defined, skip calculation。')
 
         return metrics
+    
+    def collect_predictions(self, loader: DataLoader):
+        self.model.eval()
+        
+        all_ids = []
+        all_preds = []
+        all_targets = []
+        
+        with torch.no_grad():
+            for batch in loader:
+                spec, imgs, targets = batch['spectrum'], batch['image'], batch['sugar']
+                sids, cids = batch['sid'], batch['cid']
+                spec = spec.to(self.device, non_blocking=True)
+                imgs = imgs.to(self.device, non_blocking=True)
+                targets = targets.to(self.device, non_blocking=True).squeeze()
+
+                if self.scaler is not None:
+                    with torch.cuda.amp.autocast():
+                        outputs = self.model(spec, imgs)
+                else:
+                    outputs = self.model(spec, imgs)
+                
+                all_ids.extend([f"{int(s)}_{int(c)}" for s, c in zip(sids, cids)])
+                all_preds.append(outputs)
+                all_targets.append(targets)
+        
+        all_preds_tensor = torch.cat(all_preds).cpu()
+        all_targets_tensor = torch.cat(all_targets).cpu()
+
+        return all_ids, all_preds_tensor, all_targets_tensor
+
 
     def train(self) -> None:
         # 调用训练开始回调

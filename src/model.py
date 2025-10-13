@@ -178,7 +178,6 @@ class TransformerEncoder(nn.Module):
             self.pre_net = nn.Linear(input_channels, embed_dim)
         
         # 位置编码
-        print("序列长：", seq_len)
         self.pos_embed = nn.Parameter(torch.randn(1, seq_len, embed_dim))
         
         # Transformer编码器
@@ -373,6 +372,16 @@ class CrossModalFusion(nn.Module):
                 nn.Dropout(dropout)
             )
             
+        elif method == 'add' or method == 'mul':
+            # 直接相加
+            assert in_dim_spectral == in_dim_image, "Add方法和Mul需要相同输入维度"
+            self.proj = nn.Squential(
+                nn.Linear(in_dim_spectral, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout)
+            )
+            
         elif method == 'bilinear':
             # 双线性交互
             self.bilinear = nn.Bilinear(in_dim_spectral, in_dim_image, hidden_dim)
@@ -395,12 +404,20 @@ class CrossModalFusion(nn.Module):
             self.dropout = nn.Dropout(dropout)
             
         else:
-            raise ValueError(f"未知融合方法: {method}")
+            raise ValueError(f"Unknown fusion method: {method}")
 
     def forward(self, spectral_feat: torch.Tensor, image_feat: torch.Tensor) -> torch.Tensor:
 
         if self.method == 'concat':
             fused = torch.cat([spectral_feat, image_feat], dim=-1)
+            return self.proj(fused)
+        
+        elif self.method == 'add':
+            fused = spectral_feat + image_feat
+            return self.proj(fused)
+        
+        elif self.method == 'mult':
+            fused = spectral_feat * image_feat
             return self.proj(fused)
             
         elif self.method == 'bilinear':
@@ -437,7 +454,7 @@ class AppleSugarModel(nn.Module):
         super().__init__()
         
         # 编码器检查
-        assert spectral_encoder or image_encoder, "至少需要提供一个编码器"
+        assert spectral_encoder or image_encoder, "At least one encoder needs to be provided"
         self.spectral_encoder = spectral_encoder
         self.image_encoder = image_encoder
         self.is_multimodal = bool(spectral_encoder and image_encoder)
@@ -445,7 +462,9 @@ class AppleSugarModel(nn.Module):
         # 单模态输出
         if not self.is_multimodal:
             encoder = spectral_encoder if spectral_encoder else image_encoder
-            self.proj = nn.Linear(encoder.output_dim, output_dim)
+            self.proj = nn.Sequential(
+                nn.Linear(encoder.output_dim, output_dim),
+            )
         
         # 多模态融合
         else:
@@ -469,18 +488,19 @@ class AppleSugarModel(nn.Module):
                spectral: Optional[torch.Tensor] = None, 
                images: Optional[torch.Tensor] = None):
 
-        assert spectral is not None or images is not None, "需要至少一个输入"
+        assert spectral is not None or images is not None, "At least one input is required"
         
         if not self.is_multimodal:
             if self.spectral_encoder is not None:
                 features = self.spectral_encoder(spectral)
             else:
+                images = images[:, 0, :, :, :]  # 单视角
                 features = self.image_encoder(images)
 
             output = self.proj(features)
         
         else:
-            assert spectral is not None and images is not None, "双模态需要两个输入"
+            assert spectral is not None and images is not None, "Dual-mode requires two inputs"
             spectral_feat = self.spectral_encoder(spectral)
             image_feat = self.image_encoder(images)
             fused = self.fusion(spectral_feat, image_feat)
@@ -496,91 +516,90 @@ class AppleSugarModel(nn.Module):
             None: None
         }.get(name)
 
+def get_spectral_encoder(config: Dict[str, Any]) -> nn.Module:
+    if config['type'] == 'resnet1d':
+        return ResNet1dEncoder(
+            block=BasicBlock1d,
+            in_channels=config.get('in_channels', 1),
+            output_dim=config.get('output_dim', None),
+            layers=config.get('layers', (2,2)),
+            pool_type=config.get('pool_type', 'avg'),
+            zero_init_residual=config.get('zero_init_residual', False)
+        )
+        
+    elif config['type'] == 'transformer':
+        return TransformerEncoder(
+            input_channels=config.get('in_channels', 1),
+            seq_len=config.get('seq_len', 256),
+            embed_dim=config.get('embed_dim', 64),
+            output_dim=config.get('output_dim', None),
+            n_heads=config.get('n_heads', 4),
+            n_layers=config.get('n_layers', 3),
+            expansion_ratio=config.get('expansion_ratio', 4),
+            dropout=config.get('dropout', 0.1),
+            use_cnn_preproc=config.get('use_cnn_preproc', True),
+            pool_type=config.get('pool_type', 'mean')
+        )
+    else:
+        raise ValueError(f"Unknown spectral encoder type: {config['type']}")
+
+def get_image_encoder(config: Dict[str, Any]) -> nn.Module:
+    if config['type'] in ['resnet', 'vit']:
+        return get_base_image_encoder(config)
+        
+    if config['type'] == 'multiview':
+        base_encoder_config = config.get('base_encoder', None)
+        if not base_encoder_config:
+            raise ValueError("Multiview encoder requires 'base_encoder' configuration")
+        base_encoder = get_base_image_encoder(base_encoder_config)
+        return MultiViewEncoder(
+            base_encoder=base_encoder,
+            num_views=config.get('num_views', 2),
+            fusion_method=config.get('fusion_method', 'attention'),
+            output_dim=config.get('output_dim', None),
+            dropout=config.get('dropout', 0.1)
+        )
+        
+def get_base_image_encoder(config: Dict[str, Any]) -> nn.Module:
+    if config['type'] == 'resnet':
+        return ResNetEncoder(
+            model_name=config.get('model_name', 'resnet18'),
+            pretrained=config.get('pretrained', True),
+            freeze_layers=config.get('freeze_layers', False),
+            output_dim=config.get('output_dim', None),
+            pool_type=config.get('pool_type', 'avg')
+        )
+    elif config['type'] == 'vit':
+        return VitEncoder(
+            model_name=config.get('model_name', 'vit_tiny_patch16_224'),
+            pretrained=config.get('pretrained', True),
+            freeze_layers=config.get('freeze_layers', False),
+            output_dim=config.get('output_dim', None)
+        )
+    else:
+        raise ValueError(f"Unknown image encoder type: {config['type']}")
 
 def get_model(
-    # 编码器选择
-    spectral_encoder_type: Optional[Literal['resnet1d', 'transformer']] = None,
-    image_encoder_type: Optional[Literal['resnet', 'vit', 'multiview']] = None,
-    
+    # 编码器配置
+    encoder_config: Dict[str, Any],
     # 通用配置
-    output_dim: int = 1,
-    fusion_method: Literal['concat', 'bilinear', 'cross_attention'] = 'concat',
+    fusion_method: str = 'concat',
     hidden_dim: int = 512,
+    output_dim: int = 1,
     dropout: float = 0.3,
-    output_activation: Optional[Literal['sigmoid', 'relu', 'tanh']] = None,
+    output_activation: Optional[str] = None
+) -> AppleSugarModel:
     
-    # 光谱编码器配置
-    spectral_params: Optional[Dict[str, Any]] = None,
+    if 'spectral_encoder' in encoder_config:
+        spectral_encoder = get_spectral_encoder(encoder_config['spectral_encoder'])
+    else:
+        spectral_encoder = None
     
-    # 图像编码器配置
-    image_params: Optional[Dict[str, Any]] = None,
+    if 'image_encoder' in encoder_config:
+        image_encoder = get_image_encoder(encoder_config['image_encoder'])
+    else:
+        image_encoder = None
     
-    # 多视角配置
-    multiview_params: Optional[Dict[str, Any]] = None
-) -> nn.Module:
-    
-    # 默认参数
-    default_spectral_params = {
-        'resnet1d': {'layers': [2,2,2,2], 'pool_type': 'mean'},
-        'transformer': {'embed_dim': 64, 'pool_type': 'mean', 'use_cnn_preproc': True}
-    }
-    default_image_params = {
-        'resnet': {'model_name': 'resnet18', 'pool_type': 'avg'},
-        'vit': {'model_name': 'vit_tiny_patch16_224', 'freeze_layers': False}
-    }
-    default_multiview_params = {'num_views': 2, 'fusion_method': 'attention'}
-    
-    # 合并参数
-    spectral_params = {**default_spectral_params.get(spectral_encoder_type, {}), 
-                      **(spectral_params or {})}
-    image_params = {**default_image_params.get(image_encoder_type.replace('multiview','') 
-                  if image_encoder_type else '', {}), 
-                  **(image_params or {})}
-    multiview_params = {**default_multiview_params, **(multiview_params or {})}
-    
-    # 构建光谱编码器
-    spectral_encoder = None
-    if spectral_encoder_type == 'resnet1d':
-        spectral_encoder = ResNet1dEncoder(
-            block=BasicBlock1d,
-            in_channels=1,
-            output_dim=hidden_dim if fusion_method != 'concat' else None,
-            **{k:v for k,v in spectral_params.items() 
-               if k in ['layers', 'pool_type', 'zero_init_residual']}
-        )
-    elif spectral_encoder_type == 'transformer':
-        spectral_encoder = TransformerEncoder(
-            output_dim=hidden_dim if fusion_method != 'concat' else None,
-            **{k:v for k,v in spectral_params.items() 
-               if k in ['seq_len', 'embed_dim', 'n_heads', 'n_layers', 'pool_type', 'use_cnn_preproc']}
-        )
-
-    # 构建图像编码器
-    image_encoder = None
-    if image_encoder_type:
-        # 基础编码器
-        if 'resnet' in image_encoder_type:
-            base_encoder = ResNetEncoder(
-                output_dim=hidden_dim if fusion_method != 'concat' else None,
-                **{k:v for k,v in image_params.items() 
-                   if k in ['model_name', 'pool_type', 'freeze_layers']}
-            )
-        else:  # vit
-            base_encoder = VitEncoder(
-                output_dim=hidden_dim if fusion_method != 'concat' else None,
-                **{k:v for k,v in image_params.items() 
-                   if k in ['model_name', 'freeze_layers']}
-            )
-        
-        # 多视角处理
-        if 'multiview' in image_encoder_type:
-            image_encoder = MultiViewEncoder(
-                base_encoder=base_encoder,
-                **multiview_params
-            )
-        else:
-            image_encoder = base_encoder
-
     return AppleSugarModel(
         spectral_encoder=spectral_encoder,
         image_encoder=image_encoder,
