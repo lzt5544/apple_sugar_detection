@@ -33,7 +33,6 @@ model_config = {
         'type' : 'resnet1d',
         'layers' : (2, 2),
         'output_dim' : hidden_dim,
-        'pool_type' : 'avg'
         },
     # 'image_encoder' : {
     #     'type' : 'multiview',
@@ -47,11 +46,11 @@ model_config = {
     #     'fusion_method' : 'attention',
     #     'dropout' : 1.0
     # },
-    'image_encoder' : {
-        'type' : 'resnet',
-        'output_dim' : hidden_dim,
-        # 'pretrained' : True
-    },
+    # 'image_encoder' : {
+    #     'type' : 'resnet',
+    #     'output_dim' : hidden_dim,
+    #     # 'pretrained' : True
+    # }
 }
 
 # 数据集相关
